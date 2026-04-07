@@ -7,6 +7,7 @@
 import crypto from "crypto"
 import type { Logger } from "@medusajs/framework/types"
 import type { PayuProviderConfig, PayuVerifyResponse, PayuRefundResponse } from "./types"
+import { PAYU_DEFAULT_TIMEOUT_MS } from "./config"
 
 // PayU API Endpoints
 const PAYU_ENDPOINTS = {
@@ -35,7 +36,7 @@ export class PayuClient {
     /**
      * Default API timeout in milliseconds (30 seconds)
      */
-    private readonly API_TIMEOUT_MS = 30000
+    private readonly API_TIMEOUT_MS = PAYU_DEFAULT_TIMEOUT_MS
 
     /**
      * Fetch with timeout to prevent hanging requests
@@ -148,7 +149,13 @@ export class PayuClient {
         }
 
         const calculatedHash = crypto.createHash("sha512").update(hashString).digest("hex").toLowerCase()
-        return calculatedHash === params.hash.toLowerCase()
+        const incomingHash = params.hash.toLowerCase()
+        const calculatedBuffer = Buffer.from(calculatedHash, "utf8")
+        const incomingBuffer = Buffer.from(incomingHash, "utf8")
+        if (calculatedBuffer.length !== incomingBuffer.length) {
+            return false
+        }
+        return crypto.timingSafeEqual(calculatedBuffer, incomingBuffer)
     }
 
     /**

@@ -53,6 +53,8 @@ export const PAYU_PROVIDER_ID = "payu"
  */
 class PayuPaymentProviderService extends AbstractPaymentProvider<PayuProviderConfig> {
     static identifier = PAYU_PROVIDER_ID
+    private static readonly webhookReplayCache = new Map<string, number>()
+    private static readonly webhookReplayTtlMs = 10 * 60 * 1000
 
     /**
      * Validate provider options at startup
@@ -76,6 +78,25 @@ class PayuPaymentProviderService extends AbstractPaymentProvider<PayuProviderCon
     protected config_: PayuProviderConfig
     protected logger_: Logger
     protected client_: PayuClient
+
+    private markWebhookProcessed(key: string): boolean {
+        const now = Date.now()
+        for (const [cacheKey, expiresAt] of PayuPaymentProviderService.webhookReplayCache.entries()) {
+            if (expiresAt <= now) {
+                PayuPaymentProviderService.webhookReplayCache.delete(cacheKey)
+            }
+        }
+
+        if (PayuPaymentProviderService.webhookReplayCache.has(key)) {
+            return false
+        }
+
+        PayuPaymentProviderService.webhookReplayCache.set(
+            key,
+            now + PayuPaymentProviderService.webhookReplayTtlMs
+        )
+        return true
+    }
 
     constructor(container: Record<string, unknown>, config: PayuProviderConfig) {
         super(container, config)
@@ -132,9 +153,7 @@ class PayuPaymentProviderService extends AbstractPaymentProvider<PayuProviderCon
             const formattedAmount = this.formatAmount(amount)
 
             // Debug logging for amount calculation
-            this.logger_?.info?.(`PayU initiatePayment - Raw amount: ${JSON.stringify(amount)}`)
-            this.logger_?.info?.(`PayU initiatePayment - Formatted amount: ${formattedAmount}`)
-            this.logger_?.info?.(`PayU initiatePayment - Context: ${JSON.stringify(context, null, 2)}`)
+            this.logger_?.debug?.(`PayU initiatePayment amount=${formattedAmount}`)
 
             const customer = context?.customer
             const inputData = input.data as Record<string, unknown> | undefined
@@ -576,10 +595,7 @@ class PayuPaymentProviderService extends AbstractPaymentProvider<PayuProviderCon
      */
     async getWebhookActionAndData(data: ProviderWebhookPayload["payload"]): Promise<WebhookActionResult> {
         try {
-            this.logger_?.info?.(
-                `[PayU Webhook] payload check: data keys=${data ? Object.keys(data).join(',') : 'null'} | ` +
-                `nested=${data?.data ? Object.keys(data.data as object).join(',') : 'null'}`
-            )
+            this.logger_?.debug?.(`[PayU Webhook] payload received`)
 
             // INTERCEPT EXPRESS/MEDUSA MIS-PARSED JSON STRINGS
             // recover express body parser oopsies 
@@ -692,9 +708,20 @@ class PayuPaymentProviderService extends AbstractPaymentProvider<PayuProviderCon
                 return { action: "not_supported" }
             }
 
+            if (!webhook.amount) {
+                this.logger_?.warn?.(`[PayU Webhook] missing amount for txnid=${webhook.txnid}`)
+                return { action: "not_supported" }
+            }
+
             this.logger_?.info?.(
                 `[PayU Webhook] txnid=${webhook.txnid}, status=${webhook.status}, amount=${webhook.amount}`
             )
+
+            const replayKey = `${webhook.txnid}:${webhook.status}:${webhook.mihpayid || "na"}:${webhook.amount}`
+            if (!this.markWebhookProcessed(replayKey)) {
+                this.logger_?.warn?.(`[PayU Webhook] replay detected for txnid=${webhook.txnid}`)
+                return { action: "not_supported" }
+            }
 
             // Verify hash to ensure webhook authenticity
             // Formula: sha512(SALT|status||||||udf5|udf4|udf3|udf2|udf1|email|firstname|productinfo|amount|txnid|key)
